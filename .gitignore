@@ -1,0 +1,13 @@
+# Build artifacts
+target/
+*.o
+*.bin
+
+# Secrets
+.env
+secrets/
+*.key
+
+# IDE
+.vscode/
+.idea/
