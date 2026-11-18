@@ -2,7 +2,8 @@
 // ESP32-S3 | no_std | AI suggests, safety.rs decides.
 
 #![no_std]
-#![no_main]
+esp_bootloader_esp_idf::esp_app_desc!();
+
 
 mod safety;
 
