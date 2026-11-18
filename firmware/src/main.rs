@@ -1,43 +1,118 @@
-// FrostCore – Embedded control loop with Geometry-Optimized Heater Placement
-// ESP32-S3 target | No_std | Minimal footprint
-// Geometry raises effective freeze protection ~15-25% via bottom priority.
+// safety.rs - Hard // FrostGuard - Cooling tower water optimizer
+// ESP32-S3 | no_std | AI suggests, safety.rs decides.
 
 #![no_std]
 #![no_main]
 
-const BOTTOM_PRIORITY: f32 = 1.15;      // +15% effective heat at 6 o'clock
-const OFFSET_PRIORITY: f32 = 1.08;      // +8% at 5 & 7 o'clock
-const RISK_THRESHOLD: f32 = 0.72;       // Slightly lower threshold thanks to geometry
+mod safety;
 
-#[entry]
+use core::panic::PanicInfo;
+use esp_hal::delay::Delay;
+use safety::{enforce, Limits, Readings, Setpoints};
+
+const LIMITS: Limits = Limits {
+    max_conductivity_us: 3000.0,
+    min_water_level_pct: 40.0,
+    max_return_temp_c: 35.0,
+    min_biocide_ppm: 0.5,
+    fan_min_pct: 20.0,
+    fan_max_pct: 100.0,
+};
+
+// The site's normal settings, used if sensors fail.
+const FALLBACK: Setpoints = Setpoints { bleed_open: false, fan_pct: 70.0 };
+
+// Target conductivity: bleed off only when needed, which saves water.
+const TARGET_CONDUCTIVITY_US: f32 = 2500.0;
+
+#[esp_hal::main]
 fn main() -> ! {
+    let _peripherals = esp_hal::init(esp_hal::Config::default());
+    let delay = Delay::new();
+
     loop {
-        let ambient_temp = read_temp_sensor();
-        let pipe_temp = read_pipe_temp();
+        let r = read_sensors();
+        let ai = ai_suggest(&r);
+        let (safe, alarms) = enforce(ai, r, LIMITS, FALLBACK);
 
-        let risk = calculate_geometry_risk(ambient_temp, pipe_temp);
-
-        if risk > RISK_THRESHOLD {
-            // Apply bottom-first geometry boost
-            activate_heater_with_priority(BOTTOM_PRIORITY);
-        } else {
-            deactivate_heater();
+        set_bleed_valve(safe.bleed_open);
+        set_fan_speed(safe.fan_pct);
+        if alarms.any() {
+            raise_alarm();
         }
+
+        delay.delay_millis(1000);
     }
 }
 
-fn calculate_geometry_risk(ambient: f32, pipe: f32) -> f32 {
-    let base_risk = 1.0 / (1.0 + (-(2.8 - ambient) * 2.3).exp());
-    let geometry_boost = if pipe < 2.0 { BOTTOM_PRIORITY } else { 1.0 };
-    (base_risk * geometry_boost).min(1.0)
+// Simple first "AI": hold conductivity near target,
+// and slow the fans when the water is already cool.
+fn ai_suggest(r: &Readings) -> Setpoints {
+    let bleed_open = r.conductivity_us > TARGET_CONDUCTIVITY_US;
+    let fan_pct = if r.return_temp_c < 28.0 { 40.0 } else { 80.0 };
+    Setpoints { bleed_open, fan_pct }
 }
 
-fn activate_heater_with_priority(priority: f32) {
-    // Real hardware: scale PWM duty cycle by priority
-    // Bottom zone gets full priority * power
-    // 5/7 o'clock zones get OFFSET_PRIORITY
+// Placeholders: swap in real sensor reads.
+fn read_sensors() -> Readings {
+    Readings {
+        conductivity_us: 2400.0,
+        water_level_pct: 75.0,
+        return_temp_c: 30.0,
+        biocide_ppm: 1.0,
+        sensors_ok: true,
+    }
 }
 
-fn deactivate_heater() {}
-fn read_temp_sensor() -> f32 { 1.7 }
-fn read_pipe_temp() -> f32 { 2.1 }
+fn set_bleed_valve(_open: bool) {}
+fn set_fan_speed(_pct: f32) {}
+fn raise_alarm() {}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}
+
+    pub low_water: bool,
+    pub high_temp: bool,
+    pub low_biocide: bool,
+}
+
+impl Alarms {
+    pub fn any(&self) -> bool {
+        self.sensor_fault || self.high_conductivity || self.low_water
+            || self.high_temp || self.low_biocide
+    }
+}
+
+pub fn enforce(ai: Setpoints, r: Readings, lim: Limits, fallback: Setpoints)
+    -> (Setpoints, Alarms)
+{
+    let mut alarms = Alarms::default();
+
+    if !r.sensors_ok {
+        alarms.sensor_fault = true;
+        return (fallback, alarms);
+    }
+
+    let mut out = ai;
+    out.fan_pct = out.fan_pct.clamp(lim.fan_min_pct, lim.fan_max_pct);
+
+    if r.conductivity_us > lim.max_conductivity_us {
+        out.bleed_open = true;
+        alarms.high_conductivity = true;
+    }
+    if r.water_level_pct < lim.min_water_level_pct {
+        out.bleed_open = false; // low water wins
+        alarms.low_water = true;
+    }
+    if r.return_temp_c > lim.max_return_temp_c {
+        out.fan_pct = lim.fan_max_pct;
+        alarms.high_temp = true;
+    }
+    if r.biocide_ppm < lim.min_biocide_ppm {
+        alarms.low_biocide = true;
+    }
+
+    (out, alarms)
+}
