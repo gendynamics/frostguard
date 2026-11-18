@@ -1,15 +1,16 @@
-// safety.rs - Hard // FrostGuard - Cooling tower water optimizer
+// FrostGuard - Cooling tower water optimizer
 // ESP32-S3 | no_std | AI suggests, safety.rs decides.
 
 #![no_std]
-esp_bootloader_esp_idf::esp_app_desc!();
-
+#![no_main]
 
 mod safety;
 
 use core::panic::PanicInfo;
 use esp_hal::delay::Delay;
 use safety::{enforce, Limits, Readings, Setpoints};
+
+esp_bootloader_esp_idf::esp_app_desc!();
 
 const LIMITS: Limits = Limits {
     max_conductivity_us: 3000.0,
@@ -72,48 +73,4 @@ fn raise_alarm() {}
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
-}
-
-    pub low_water: bool,
-    pub high_temp: bool,
-    pub low_biocide: bool,
-}
-
-impl Alarms {
-    pub fn any(&self) -> bool {
-        self.sensor_fault || self.high_conductivity || self.low_water
-            || self.high_temp || self.low_biocide
-    }
-}
-
-pub fn enforce(ai: Setpoints, r: Readings, lim: Limits, fallback: Setpoints)
-    -> (Setpoints, Alarms)
-{
-    let mut alarms = Alarms::default();
-
-    if !r.sensors_ok {
-        alarms.sensor_fault = true;
-        return (fallback, alarms);
-    }
-
-    let mut out = ai;
-    out.fan_pct = out.fan_pct.clamp(lim.fan_min_pct, lim.fan_max_pct);
-
-    if r.conductivity_us > lim.max_conductivity_us {
-        out.bleed_open = true;
-        alarms.high_conductivity = true;
-    }
-    if r.water_level_pct < lim.min_water_level_pct {
-        out.bleed_open = false; // low water wins
-        alarms.low_water = true;
-    }
-    if r.return_temp_c > lim.max_return_temp_c {
-        out.fan_pct = lim.fan_max_pct;
-        alarms.high_temp = true;
-    }
-    if r.biocide_ppm < lim.min_biocide_ppm {
-        alarms.low_biocide = true;
-    }
-
-    (out, alarms)
 }
